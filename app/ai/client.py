@@ -11,7 +11,7 @@ import time
 from typing import Iterator, Optional
 
 from google import genai
-from google.genai import errors, types
+from google.genai import types
 
 from . import usage_log
 
@@ -41,11 +41,26 @@ def get_client() -> "genai.Client":
 
 
 def _is_retryable(exc: Exception) -> bool:
-    """5xx sunucu hatalarında ve 429 rate limit'te retry edilir; diğer 4xx hatalarında edilmez."""
-    if isinstance(exc, errors.ServerError):
-        return True
-    if isinstance(exc, errors.ClientError) and getattr(exc, "code", None) == 429:
-        return True
+    """Sadece geçici sunucu hatalarında (5xx) retry edilir.
+
+    ÖNEMLİ (bulundu ve düzeltildi): `client.interactions.create()` hataları
+    `google.genai.errors.ServerError/ClientError` DEĞİL, SDK'nın farklı bir
+    iç modülündeki (`_gaos.lib.compat_errors`) `APIStatusError` alt
+    sınıflarını (`RateLimitError`, `InternalServerError`, ...) fırlatıyor —
+    eski kontrol (`isinstance(exc, errors.ServerError)`) bunları hiç
+    yakalamıyordu, yani 5xx hatalarında retry gerçekte hiç çalışmıyordu.
+    Artık asıl sınıfa bağımlı olmadan `status_code`/`code` attribute'una
+    (her iki hata ailesinde de var) bakıyoruz.
+
+    429 (rate limit) KASITLI OLARAK retry edilMİyor: ücretsiz Gemini planında
+    limit aşımı genelde onlarca saniye sürüyor (bkz. hata mesajındaki
+    "Please retry in Xs") — bunu tek bir HTTP isteği içinde beklemek
+    kullanıcıyı gereksiz yere uzun süre bekletir. Bunun yerine hata hemen
+    yukarı fırlatılır, çağıran taraf kullanıcıya anlamlı bir mesaj gösterir.
+    """
+    status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if status_code is not None:
+        return 500 <= status_code < 600
     return False
 
 

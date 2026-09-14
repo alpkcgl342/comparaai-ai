@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from app.ai import cache
 from app.ai.client import generate
+from app.ai.formatting import format_products_block
 from app.ai.matching import find_candidates
 from app.ai.prompts.article_analyze import ARTICLE_ANALYZE_SYSTEM_PROMPT
 from app.ai.prompts.compare import COMPARE_SYSTEM_PROMPT
@@ -38,19 +39,27 @@ app.add_middleware(
 )
 
 
+class Product(BaseModel):
+    id: str
+    name: str
+    brand: str
+    price: float | None = None
+    specs: dict
+    # Faz 3: ProductAiScore'dan gelen puan/özet — verilirse prompt'larda
+    # kullanılır (özellikle future_proof_score, "geleceğe dönüklük" soruları
+    # için). Anahtarlar main.py'deki ScoreProductResponse ile aynı
+    # (overall_score, future_proof_score, value_score, ai_summary, ...).
+    ai_score: dict | None = None
+
+
 class FollowupRequest(BaseModel):
-    products: list["Product"]
+    products: list[Product]
     question: str
 
 
 @app.post("/followup")
 def followup(request: FollowupRequest):
-    products_text = "\n".join(
-        [
-            f"- {p.name} ({p.brand}), Özellikler: {p.specs}"
-            for p in request.products
-        ]
-    )
+    products_text = format_products_block(request.products)
 
     prompt = f"""Önerilen ürünler:
 {products_text}
@@ -66,18 +75,14 @@ Kullanıcının takip sorusu: "{request.question}\""""
     return {"answer": answer}
 
 
-class Product(BaseModel):
-    id: str
-    name: str
-    brand: str
-    price: float | None = None
-    specs: dict
-
-
 class RecommendationRequest(BaseModel):
     products: list[Product]
     budget: float | None = None
     priority: str | None = None
+    # Faz 3: kullanıcının orijinal mesajı/senaryosu (örn. "seyahat için",
+    # "öğrenci bütçesiyle") — priority tek kelimeyle özetleyemediği nüansı
+    # taşır, AI'a olduğu gibi verilir.
+    context: str | None = None
 
 
 @app.get("/")
@@ -136,6 +141,7 @@ def recommend(request: RecommendationRequest):
             "product_ids": sorted([p.id for p in request.products]),
             "budget": request.budget,
             "priority": request.priority,
+            "context": request.context,
         },
     )
 
@@ -143,16 +149,16 @@ def recommend(request: RecommendationRequest):
     if cached:
         return {**cached, "cached": True}
 
-    products_text = "\n".join(
-        [
-            f"- {p.name} ({p.brand}), Özellikler: {p.specs}"
-            for p in request.products
-        ]
-    )
+    products_text = format_products_block(request.products)
 
     user_context = f"Kullanıcının önceliği: {request.priority}\n" if request.priority else ""
+    scenario_context = (
+        f"Kullanıcının orijinal mesajı/senaryosu: \"{request.context}\"\n"
+        if request.context
+        else ""
+    )
 
-    prompt = f"""{user_context}
+    prompt = f"""{user_context}{scenario_context}
 Aşağıdaki ürünler arasından kullanıcıya en uygun olanını/olanlarını gerekçeli şekilde öner:
 
 {products_text}"""
@@ -166,6 +172,10 @@ Aşağıdaki ürünler arasından kullanıcıya en uygun olanını/olanlarını 
 
 class CompareRequest(BaseModel):
     products: list[Product]
+    # Faz 3: kullanıcının orijinal sorusu/senaryosu — örn. "seyahat için
+    # hangisi" ya da "A55'ten A56'ya geçmeye değer mi" gibi. Verilirse
+    # karşılaştırma bu senaryoya göre ağırlıklandırılır.
+    context: str | None = None
 
 
 @app.post("/compare")
@@ -174,21 +184,25 @@ def compare(request: CompareRequest):
         return {"error": "Karşılaştırma için en az 2 ürün gerekli."}
 
     cache_key = cache.make_cache_key(
-        "compare", {"product_ids": sorted([p.id for p in request.products])}
+        "compare",
+        {
+            "product_ids": sorted([p.id for p in request.products]),
+            "context": request.context,
+        },
     )
 
     cached = cache.get_cached(cache_key)
     if cached:
         return {**cached, "cached": True}
 
-    products_text = "\n".join(
-        [
-            f"- {p.name} ({p.brand}), Özellikler: {p.specs}"
-            for p in request.products
-        ]
+    products_text = format_products_block(request.products)
+    scenario_context = (
+        f'Kullanıcının sorusu/senaryosu: "{request.context}"\n\n'
+        if request.context
+        else ""
     )
 
-    prompt = f"""Aşağıdaki ürünleri detaylı şekilde karşılaştır:
+    prompt = f"""{scenario_context}Aşağıdaki ürünleri detaylı şekilde karşılaştır:
 
 {products_text}"""
 
