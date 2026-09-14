@@ -10,6 +10,7 @@ from app.ai.client import generate
 from app.ai.matching import find_candidates
 from app.ai.prompts.article_analyze import ARTICLE_ANALYZE_SYSTEM_PROMPT
 from app.ai.prompts.compare import COMPARE_SYSTEM_PROMPT
+from app.ai.prompts.detect_duplicates import build_duplicate_check_prompt
 from app.ai.prompts.extract_entities import (
     EXTRACT_ENTITIES_SYSTEM_PROMPT,
     build_product_match_prompt,
@@ -462,3 +463,53 @@ Haber içeriği:
         )
 
     return ExtractEntitiesResponse(entities=resolved)
+
+
+# --- Faz 2: Duplicate Haber Tespiti ---
+
+
+class DuplicateCandidate(BaseModel):
+    id: str
+    title: str
+    summary: str
+
+
+class DetectDuplicatesRequest(BaseModel):
+    title: str
+    summary: str
+    candidates: list[DuplicateCandidate] = []
+
+
+class DuplicateMatch(BaseModel):
+    article_id: str
+    similarity_score: float
+    reason: str
+
+
+class DetectDuplicatesResponse(BaseModel):
+    duplicates: list[DuplicateMatch]
+
+
+@app.post("/detect-duplicates", response_model=DetectDuplicatesResponse)
+def detect_duplicates(request: DetectDuplicatesRequest):
+    if not request.candidates:
+        return DetectDuplicatesResponse(duplicates=[])
+
+    prompt = build_duplicate_check_prompt(
+        request.title,
+        request.summary,
+        [{"id": c.id, "title": c.title, "summary": c.summary} for c in request.candidates],
+    )
+
+    raw_text = generate(prompt, feature="detect-duplicates").strip()
+    if raw_text.startswith("```"):
+        raw_text = raw_text.strip("`")
+        if raw_text.startswith("json"):
+            raw_text = raw_text[4:].strip()
+
+    try:
+        return DetectDuplicatesResponse.model_validate_json(
+            f'{{"duplicates": {raw_text}}}'
+        )
+    except Exception:
+        return DetectDuplicatesResponse(duplicates=[])
