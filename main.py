@@ -20,6 +20,7 @@ from app.ai.prompts.general_chat import GENERAL_CHAT_SYSTEM_PROMPT
 from app.ai.prompts.parse import CATEGORY_TEMPLATES, build_parse_prompt
 from app.ai.prompts.recommend import SYSTEM_PROMPT
 from app.ai.prompts.score_product import SCORE_PRODUCT_SYSTEM_PROMPT
+from app.ai.prompts.suggest_article_meta import SUGGEST_ARTICLE_META_SYSTEM_PROMPT
 
 # Çalışma dizini (cwd) nereden başlatılırsa başlatılsın (npm --prefix,
 # farklı bir launch config, vb.) her zaman comparaai-ai/.env'i bul.
@@ -513,3 +514,39 @@ def detect_duplicates(request: DetectDuplicatesRequest):
         )
     except Exception:
         return DetectDuplicatesResponse(duplicates=[])
+
+
+# --- Faz 2: AI Editör (başlık/SEO/etiket önerisi) ---
+
+
+class SuggestArticleMetaRequest(BaseModel):
+    title: str = ""
+    content: str
+
+
+class SuggestArticleMetaResponse(BaseModel):
+    title_suggestions: list[str] = []
+    seo_meta_description: str = ""
+    tags: list[str] = []
+
+
+@app.post("/suggest-article-meta", response_model=SuggestArticleMetaResponse)
+def suggest_article_meta(request: SuggestArticleMetaRequest):
+    title_line = f"Mevcut başlık (varsa): {request.title}\n" if request.title else ""
+    prompt = f"""{title_line}Haber içeriği:
+{request.content}"""
+
+    raw_text = generate(
+        prompt,
+        system_instruction=SUGGEST_ARTICLE_META_SYSTEM_PROMPT,
+        feature="suggest-article-meta",
+    ).strip()
+    if raw_text.startswith("```"):
+        raw_text = raw_text.strip("`")
+        if raw_text.startswith("json"):
+            raw_text = raw_text[4:].strip()
+
+    try:
+        return SuggestArticleMetaResponse.model_validate_json(raw_text)
+    except Exception:
+        return SuggestArticleMetaResponse()
