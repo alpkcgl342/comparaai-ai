@@ -11,6 +11,7 @@ from app.ai.prompts.followup import FOLLOWUP_SYSTEM_PROMPT
 from app.ai.prompts.general_chat import GENERAL_CHAT_SYSTEM_PROMPT
 from app.ai.prompts.parse import CATEGORY_TEMPLATES, build_parse_prompt
 from app.ai.prompts.recommend import SYSTEM_PROMPT
+from app.ai.prompts.score_product import SCORE_PRODUCT_SYSTEM_PROMPT
 
 load_dotenv()
 
@@ -287,3 +288,60 @@ Haber içeriği:
 
     cache.set_cached(cache_key, result.model_dump())
     return result
+
+
+# --- Faz 3 P0: AI Ürün Skoru ---
+
+
+class ScoreProductRequest(BaseModel):
+    id: str
+    name: str
+    brand: str
+    category: str
+    price: float | None = None
+    specs: dict
+
+
+class ScoreProductResponse(BaseModel):
+    overall_score: float
+    performance_score: float | None = None
+    camera_score: float | None = None
+    battery_score: float | None = None
+    software_score: float | None = None
+    value_score: float | None = None
+    use_case_score: dict | None = None
+    future_proof_score: float | None = None
+    ai_summary: str
+    best_for: list[str] = []
+    not_for: list[str] = []
+    weaknesses: list[str] = []
+    suggested_segment: str | None = None
+
+
+@app.post("/score-product", response_model=ScoreProductResponse)
+def score_product(request: ScoreProductRequest):
+    price_line = f"Fiyat: {request.price} TL\n" if request.price else ""
+
+    prompt = f"""Ürün: {request.name} ({request.brand})
+Kategori: {request.category}
+{price_line}Özellikler: {request.specs}
+
+Bu ürünü değerlendir ve puanla."""
+
+    raw_text = generate(
+        prompt,
+        system_instruction=SCORE_PRODUCT_SYSTEM_PROMPT,
+        feature="score-product",
+    ).strip()
+    if raw_text.startswith("```"):
+        raw_text = raw_text.strip("`")
+        if raw_text.startswith("json"):
+            raw_text = raw_text[4:].strip()
+
+    try:
+        return ScoreProductResponse.model_validate_json(raw_text)
+    except Exception:
+        return ScoreProductResponse(
+            overall_score=50,
+            ai_summary="Bu ürün için AI değerlendirmesi şu anda oluşturulamadı.",
+        )
