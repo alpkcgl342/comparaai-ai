@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -5,15 +7,22 @@ from pydantic import BaseModel
 
 from app.ai import cache
 from app.ai.client import generate
+from app.ai.matching import find_candidates
 from app.ai.prompts.article_analyze import ARTICLE_ANALYZE_SYSTEM_PROMPT
 from app.ai.prompts.compare import COMPARE_SYSTEM_PROMPT
+from app.ai.prompts.extract_entities import (
+    EXTRACT_ENTITIES_SYSTEM_PROMPT,
+    build_product_match_prompt,
+)
 from app.ai.prompts.followup import FOLLOWUP_SYSTEM_PROMPT
 from app.ai.prompts.general_chat import GENERAL_CHAT_SYSTEM_PROMPT
 from app.ai.prompts.parse import CATEGORY_TEMPLATES, build_parse_prompt
 from app.ai.prompts.recommend import SYSTEM_PROMPT
 from app.ai.prompts.score_product import SCORE_PRODUCT_SYSTEM_PROMPT
 
-load_dotenv()
+# Çalışma dizini (cwd) nereden başlatılırsa başlatılsın (npm --prefix,
+# farklı bir launch config, vb.) her zaman comparaai-ai/.env'i bul.
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 app = FastAPI(title="ComparaAI - AI Danışman Servisi")
 
@@ -345,3 +354,111 @@ Bu ürünü değerlendir ve puanla."""
             overall_score=50,
             ai_summary="Bu ürün için AI değerlendirmesi şu anda oluşturulamadı.",
         )
+
+
+# --- Faz 2: Haberden bilgi çıkarma (NER) + Haber<->Ürün bağlantısı ---
+
+
+class KnownProduct(BaseModel):
+    id: str
+    name: str
+    brand: str
+
+
+class ExtractEntitiesRequest(BaseModel):
+    title: str
+    content: str
+    known_products: list[KnownProduct] = []
+
+
+class ExtractedEntity(BaseModel):
+    entity_type: str  # 'company' | 'product' | 'technology'
+    entity_name: str
+    product_id: str | None = None
+    confidence: float | None = None
+
+
+class ExtractEntitiesResponse(BaseModel):
+    entities: list[ExtractedEntity]
+
+
+def _match_product_for_entity(
+    entity_name: str, known_products: list[KnownProduct]
+) -> tuple[str | None, float | None]:
+    """Fuzzy match + (gerekirse) AI doğrulama ile entity'yi bir Product.id'ye bağlar."""
+    if not known_products:
+        return None, None
+
+    candidates = find_candidates(
+        entity_name,
+        [{"id": p.id, "name": p.name, "brand": p.brand} for p in known_products],
+    )
+
+    if not candidates:
+        return None, None
+
+    # Tek ve çok güçlü bir eşleşme varsa AI doğrulamasına gerek yok.
+    if len(candidates) == 1 and candidates[0][1] >= 0.85:
+        return candidates[0][0]["id"], candidates[0][1]
+
+    # Belirsiz/çoklu adaylarda Gemini'ye doğrulat.
+    verify_prompt = build_product_match_prompt(
+        entity_name,
+        [
+            {"id": c["id"], "label": f"{c['brand']} {c['name']}"}
+            for c, _score in candidates
+        ],
+    )
+    raw = generate(verify_prompt, feature="extract-entities-verify").strip().strip("`").strip('"').strip()
+
+    if raw.lower() == "none":
+        return None, None
+
+    for candidate, score in candidates:
+        if candidate["id"] == raw:
+            return candidate["id"], score
+
+    return None, None
+
+
+@app.post("/extract-entities", response_model=ExtractEntitiesResponse)
+def extract_entities(request: ExtractEntitiesRequest):
+    prompt = f"""Haber başlığı: {request.title}
+
+Haber içeriği:
+{request.content}"""
+
+    raw_text = generate(
+        prompt,
+        system_instruction=EXTRACT_ENTITIES_SYSTEM_PROMPT,
+        feature="extract-entities",
+    ).strip()
+    if raw_text.startswith("```"):
+        raw_text = raw_text.strip("`")
+        if raw_text.startswith("json"):
+            raw_text = raw_text[4:].strip()
+
+    try:
+        raw_entities = ExtractEntitiesResponse.model_validate_json(
+            f'{{"entities": {raw_text}}}'
+        ).entities
+    except Exception:
+        return ExtractEntitiesResponse(entities=[])
+
+    resolved: list[ExtractedEntity] = []
+    for entity in raw_entities:
+        product_id, confidence = (None, None)
+        if entity.entity_type == "product":
+            product_id, confidence = _match_product_for_entity(
+                entity.entity_name, request.known_products
+            )
+        resolved.append(
+            ExtractedEntity(
+                entity_type=entity.entity_type,
+                entity_name=entity.entity_name,
+                product_id=product_id,
+                confidence=confidence,
+            )
+        )
+
+    return ExtractEntitiesResponse(entities=resolved)
