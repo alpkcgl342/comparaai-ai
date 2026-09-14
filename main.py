@@ -10,6 +10,7 @@ from app.ai.client import generate
 from app.ai.matching import find_candidates
 from app.ai.prompts.article_analyze import ARTICLE_ANALYZE_SYSTEM_PROMPT
 from app.ai.prompts.compare import COMPARE_SYSTEM_PROMPT
+from app.ai.prompts.compare_sources import build_compare_sources_prompt
 from app.ai.prompts.detect_duplicates import build_duplicate_check_prompt
 from app.ai.prompts.extract_entities import (
     EXTRACT_ENTITIES_SYSTEM_PROMPT,
@@ -21,6 +22,7 @@ from app.ai.prompts.parse import CATEGORY_TEMPLATES, build_parse_prompt
 from app.ai.prompts.recommend import SYSTEM_PROMPT
 from app.ai.prompts.score_product import SCORE_PRODUCT_SYSTEM_PROMPT
 from app.ai.prompts.suggest_article_meta import SUGGEST_ARTICLE_META_SYSTEM_PROMPT
+from app.ai.prompts.verify_article import VERIFY_ARTICLE_SYSTEM_PROMPT
 
 # Çalışma dizini (cwd) nereden başlatılırsa başlatılsın (npm --prefix,
 # farklı bir launch config, vb.) her zaman comparaai-ai/.env'i bul.
@@ -550,3 +552,88 @@ def suggest_article_meta(request: SuggestArticleMetaRequest):
         return SuggestArticleMetaResponse.model_validate_json(raw_text)
     except Exception:
         return SuggestArticleMetaResponse()
+
+
+# --- Faz 2: AI Haber Doğrulama Yardımcısı ---
+
+
+class VerifyArticleRequest(BaseModel):
+    title: str
+    content: str
+
+
+class VerifyIssue(BaseModel):
+    issue_type: str  # 'celiski' | 'abartili_iddia' | 'kaynak_belirsiz'
+    excerpt: str
+    explanation: str
+    suggestion: str
+
+
+class VerifyArticleResponse(BaseModel):
+    issues: list[VerifyIssue]
+
+
+@app.post("/verify-article", response_model=VerifyArticleResponse)
+def verify_article(request: VerifyArticleRequest):
+    prompt = f"""Haber başlığı: {request.title}
+
+Haber içeriği:
+{request.content}"""
+
+    raw_text = generate(
+        prompt,
+        system_instruction=VERIFY_ARTICLE_SYSTEM_PROMPT,
+        feature="verify-article",
+    ).strip()
+    if raw_text.startswith("```"):
+        raw_text = raw_text.strip("`")
+        if raw_text.startswith("json"):
+            raw_text = raw_text[4:].strip()
+
+    try:
+        return VerifyArticleResponse.model_validate_json(f'{{"issues": {raw_text}}}')
+    except Exception:
+        return VerifyArticleResponse(issues=[])
+
+
+# --- Faz 2: Çoklu Kaynak Haber Analizi ---
+
+
+class SourceArticle(BaseModel):
+    author: str | None = None
+    title: str
+    content: str
+
+
+class CompareSourcesRequest(BaseModel):
+    articles: list[SourceArticle]
+
+
+class CompareSourcesResponse(BaseModel):
+    consensus: list[str] = []
+    differences: list[str] = []
+    emphasis_notes: list[str] = []
+
+
+@app.post("/compare-sources", response_model=CompareSourcesResponse)
+def compare_sources(request: CompareSourcesRequest):
+    if len(request.articles) < 2:
+        return CompareSourcesResponse()
+
+    prompt = build_compare_sources_prompt(
+        [
+            {"author": a.author, "title": a.title, "content": a.content}
+            for a in request.articles
+        ]
+    )
+
+    raw_text = generate(prompt, feature="compare-sources").strip()
+    if raw_text.startswith("```"):
+        raw_text = raw_text.strip("`")
+        if raw_text.startswith("json"):
+            raw_text = raw_text[4:].strip()
+
+    try:
+        return CompareSourcesResponse.model_validate_json(raw_text)
+    except Exception:
+        return CompareSourcesResponse()
