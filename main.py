@@ -7,12 +7,13 @@ from pydantic import BaseModel
 
 from app.ai import cache
 from app.ai.client import generate
-from app.ai.formatting import format_products_block
+from app.ai.formatting import expertise_level_note, format_products_block
 from app.ai.matching import find_candidates
 from app.ai.prompts.article_analyze import ARTICLE_ANALYZE_SYSTEM_PROMPT
 from app.ai.prompts.compare import COMPARE_SYSTEM_PROMPT
 from app.ai.prompts.compare_sources import build_compare_sources_prompt
 from app.ai.prompts.detect_duplicates import build_duplicate_check_prompt
+from app.ai.prompts.explain_term import build_explain_term_prompt
 from app.ai.prompts.extract_entities import (
     EXTRACT_ENTITIES_SYSTEM_PROMPT,
     build_product_match_prompt,
@@ -55,13 +56,15 @@ class Product(BaseModel):
 class FollowupRequest(BaseModel):
     products: list[Product]
     question: str
+    expertise_level: str | None = None  # Faz 4: 'basit'|'normal'|'teknik'|'uzman'
 
 
 @app.post("/followup")
 def followup(request: FollowupRequest):
     products_text = format_products_block(request.products)
+    level_note = expertise_level_note(request.expertise_level)
 
-    prompt = f"""Önerilen ürünler:
+    prompt = f"""{level_note}Önerilen ürünler:
 {products_text}
 
 Kullanıcının takip sorusu: "{request.question}\""""
@@ -83,6 +86,7 @@ class RecommendationRequest(BaseModel):
     # "öğrenci bütçesiyle") — priority tek kelimeyle özetleyemediği nüansı
     # taşır, AI'a olduğu gibi verilir.
     context: str | None = None
+    expertise_level: str | None = None  # Faz 4: 'basit'|'normal'|'teknik'|'uzman'
 
 
 @app.get("/")
@@ -117,6 +121,7 @@ Eğer hiçbiri uymuyorsa veya belirsizse, sadece "null" yaz."""
 
 class GeneralChatRequest(BaseModel):
     message: str
+    expertise_level: str | None = None  # Faz 4: 'basit'|'normal'|'teknik'|'uzman'
 
 
 class GeneralChatResponse(BaseModel):
@@ -125,8 +130,9 @@ class GeneralChatResponse(BaseModel):
 
 @app.post("/general-chat", response_model=GeneralChatResponse)
 def general_chat(request: GeneralChatRequest):
+    level_note = expertise_level_note(request.expertise_level)
     answer = generate(
-        request.message,
+        f"{level_note}{request.message}",
         system_instruction=GENERAL_CHAT_SYSTEM_PROMPT,
         feature="general-chat",
     )
@@ -142,6 +148,7 @@ def recommend(request: RecommendationRequest):
             "budget": request.budget,
             "priority": request.priority,
             "context": request.context,
+            "expertise_level": request.expertise_level,
         },
     )
 
@@ -151,6 +158,7 @@ def recommend(request: RecommendationRequest):
 
     products_text = format_products_block(request.products)
 
+    level_note = expertise_level_note(request.expertise_level)
     user_context = f"Kullanıcının önceliği: {request.priority}\n" if request.priority else ""
     scenario_context = (
         f"Kullanıcının orijinal mesajı/senaryosu: \"{request.context}\"\n"
@@ -158,7 +166,7 @@ def recommend(request: RecommendationRequest):
         else ""
     )
 
-    prompt = f"""{user_context}{scenario_context}
+    prompt = f"""{level_note}{user_context}{scenario_context}
 Aşağıdaki ürünler arasından kullanıcıya en uygun olanını/olanlarını gerekçeli şekilde öner:
 
 {products_text}"""
@@ -176,6 +184,7 @@ class CompareRequest(BaseModel):
     # hangisi" ya da "A55'ten A56'ya geçmeye değer mi" gibi. Verilirse
     # karşılaştırma bu senaryoya göre ağırlıklandırılır.
     context: str | None = None
+    expertise_level: str | None = None  # Faz 4: 'basit'|'normal'|'teknik'|'uzman'
 
 
 @app.post("/compare")
@@ -188,6 +197,7 @@ def compare(request: CompareRequest):
         {
             "product_ids": sorted([p.id for p in request.products]),
             "context": request.context,
+            "expertise_level": request.expertise_level,
         },
     )
 
@@ -196,13 +206,14 @@ def compare(request: CompareRequest):
         return {**cached, "cached": True}
 
     products_text = format_products_block(request.products)
+    level_note = expertise_level_note(request.expertise_level)
     scenario_context = (
         f'Kullanıcının sorusu/senaryosu: "{request.context}"\n\n'
         if request.context
         else ""
     )
 
-    prompt = f"""{scenario_context}Aşağıdaki ürünleri detaylı şekilde karşılaştır:
+    prompt = f"""{level_note}{scenario_context}Aşağıdaki ürünleri detaylı şekilde karşılaştır:
 
 {products_text}"""
 
@@ -651,3 +662,38 @@ def compare_sources(request: CompareSourcesRequest):
         return CompareSourcesResponse.model_validate_json(raw_text)
     except Exception:
         return CompareSourcesResponse()
+
+
+# --- Faz 4: Teknoloji Terimleri AI (Sözlük) ---
+
+VALID_LEVELS = {"basit", "normal", "teknik", "uzman"}
+
+
+class ExplainTermRequest(BaseModel):
+    term: str
+    level: str = "normal"
+
+
+class ExplainTermResponse(BaseModel):
+    explanation: str
+    category: str | None = None
+    related_terms: list[str] = []
+
+
+@app.post("/explain-term", response_model=ExplainTermResponse)
+def explain_term(request: ExplainTermRequest):
+    level = request.level if request.level in VALID_LEVELS else "normal"
+    prompt = build_explain_term_prompt(request.term, level)
+
+    raw_text = generate(prompt, feature="explain-term").strip()
+    if raw_text.startswith("```"):
+        raw_text = raw_text.strip("`")
+        if raw_text.startswith("json"):
+            raw_text = raw_text[4:].strip()
+
+    try:
+        return ExplainTermResponse.model_validate_json(raw_text)
+    except Exception:
+        return ExplainTermResponse(
+            explanation="Bu terim için şu anda bir açıklama üretilemedi.",
+        )

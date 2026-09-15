@@ -31,3 +31,24 @@ def format_product_line(product: Any) -> str:
 
 def format_products_block(products: list[Any]) -> str:
     return "\n".join(format_product_line(p) for p in products)
+
+
+_LEVEL_NOTES = {
+    "basit": "Kullanıcının teknik seviyesi: BAŞLANGIÇ/ÇOCUK. Teknik terim kullanma, günlük "
+    "hayattan somut benzetmelerle çok basit anlat.",
+    "teknik": "Kullanıcının teknik seviyesi: TEKNİK. Teknik terimleri rahatça kullanabilirsin, "
+    "gerekirse kısa açıklama ekle.",
+    "uzman": "Kullanıcının teknik seviyesi: UZMAN. Teknik terimleri açıklamadan kullan, "
+    "isteniyorsa mimari/donanım detaylarına değinebilirsin.",
+}
+
+
+def expertise_level_note(level: str | None) -> str:
+    """Faz 4 — kullanıcının seçtiği teknik seviyeye göre prompt'a eklenecek not.
+
+    'normal' veya boş/None için not eklenmez (zaten promptların varsayılan tonu budur).
+    """
+    if not level:
+        return ""
+    note = _LEVEL_NOTES.get(level)
+    return f"{note}\n\n" if note else ""
