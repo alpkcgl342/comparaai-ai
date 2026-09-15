@@ -22,6 +22,11 @@ from app.ai.prompts.followup import FOLLOWUP_SYSTEM_PROMPT
 from app.ai.prompts.general_chat import GENERAL_CHAT_SYSTEM_PROMPT
 from app.ai.prompts.parse import CATEGORY_TEMPLATES, build_parse_prompt
 from app.ai.prompts.recommend import SYSTEM_PROMPT
+from app.ai.prompts.reports import (
+    build_company_analysis_prompt,
+    build_generate_report_prompt,
+    build_technology_impact_prompt,
+)
 from app.ai.prompts.score_product import SCORE_PRODUCT_SYSTEM_PROMPT
 from app.ai.prompts.suggest_article_meta import SUGGEST_ARTICLE_META_SYSTEM_PROMPT
 from app.ai.prompts.verify_article import VERIFY_ARTICLE_SYSTEM_PROMPT
@@ -696,4 +701,122 @@ def explain_term(request: ExplainTermRequest):
     except Exception:
         return ExplainTermResponse(
             explanation="Bu terim için şu anda bir açıklama üretilemedi.",
+        )
+
+
+# --- Faz 6: Trend/Rapor özellikleri (AI yorumu gereken kısımlar) ---
+# NOT: Trend TESPİTİ (istatistiksel sinyal) burada değil — o saf SQL,
+# bkz. ComparaAI backend'deki GET /reports/trending. Buradakiler o
+# sinyale/ham veriye AI yorumu ekleyen ayrı adımlar.
+
+
+class ArticleContext(BaseModel):
+    title: str
+    summary: str | None = None
+    aiImportance: str | None = None
+
+
+class ProductContext(BaseModel):
+    name: str
+    specs: dict | None = None
+
+
+class AnalyzeCompanyRequest(BaseModel):
+    company_name: str
+    articles: list[ArticleContext] = []
+    products: list[ProductContext] = []
+
+
+class AnalyzeCompanyResponse(BaseModel):
+    analysis: str
+
+
+@app.post("/analyze-company", response_model=AnalyzeCompanyResponse)
+def analyze_company(request: AnalyzeCompanyRequest):
+    prompt = build_company_analysis_prompt(
+        request.company_name,
+        [a.model_dump() for a in request.articles],
+        [p.model_dump() for p in request.products],
+    )
+    raw_text = generate(prompt, feature="analyze-company").strip()
+    if raw_text.startswith("```"):
+        raw_text = raw_text.strip("`")
+        if raw_text.startswith("json"):
+            raw_text = raw_text[4:].strip()
+
+    try:
+        return AnalyzeCompanyResponse.model_validate_json(raw_text)
+    except Exception:
+        return AnalyzeCompanyResponse(
+            analysis=f"{request.company_name} için şu anda bir analiz üretilemedi."
+        )
+
+
+class TrendingEntity(BaseModel):
+    entity_name: str
+    entity_type: str
+    mention_count: int
+
+
+class GenerateReportRequest(BaseModel):
+    report_type: str  # 'daily' | 'weekly'
+    articles: list[ArticleContext] = []
+    trending_entities: list[TrendingEntity] = []
+
+
+class GenerateReportResponse(BaseModel):
+    title: str
+    highlights: list[str] = []
+    trend_commentary: str = ""
+    social_summary: str = ""
+
+
+@app.post("/generate-report", response_model=GenerateReportResponse)
+def generate_report(request: GenerateReportRequest):
+    prompt = build_generate_report_prompt(
+        request.report_type,
+        [a.model_dump() for a in request.articles],
+        [e.model_dump() for e in request.trending_entities],
+    )
+    raw_text = generate(prompt, feature="generate-report").strip()
+    if raw_text.startswith("```"):
+        raw_text = raw_text.strip("`")
+        if raw_text.startswith("json"):
+            raw_text = raw_text[4:].strip()
+
+    try:
+        return GenerateReportResponse.model_validate_json(raw_text)
+    except Exception:
+        return GenerateReportResponse(
+            title="Rapor oluşturulamadı",
+            trend_commentary="Bu dönem için rapor şu anda üretilemedi.",
+        )
+
+
+class TechnologyImpactRequest(BaseModel):
+    technology_name: str
+    articles: list[ArticleContext] = []
+
+
+class TechnologyImpactResponse(BaseModel):
+    analysis: str
+
+
+@app.post("/technology-impact", response_model=TechnologyImpactResponse)
+def technology_impact(request: TechnologyImpactRequest):
+    prompt = build_technology_impact_prompt(
+        request.technology_name,
+        [a.model_dump() for a in request.articles],
+    )
+    raw_text = generate(prompt, feature="technology-impact").strip()
+    if raw_text.startswith("```"):
+        raw_text = raw_text.strip("`")
+        if raw_text.startswith("json"):
+            raw_text = raw_text[4:].strip()
+
+    try:
+        return TechnologyImpactResponse.model_validate_json(raw_text)
+    except Exception:
+        return TechnologyImpactResponse(
+            analysis=f"{request.technology_name} için şu anda bir etki analizi üretilemedi."
         )
